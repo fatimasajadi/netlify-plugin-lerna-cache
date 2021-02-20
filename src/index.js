@@ -1,6 +1,7 @@
-// This is the main file for the Netlify Build plugin {{name}}.
-// Please read the comments to learn more about the Netlify Build plugin syntax.
-// Find more information in the Netlify documentation.
+const fs = require('fs')
+const path = require('path')
+
+const packagesDir = 'packages'
 
 /* eslint-disable no-unused-vars */
 module.exports = {
@@ -65,14 +66,72 @@ module.exports = {
       // Utility for dealing with modified, created, deleted files since a git commit.
       // See https://github.com/netlify/build/blob/master/packages/git-utils#readme
       git,
-       // Utility for handling Netlify Functions.
+      // Utility for handling Netlify Functions.
       // See https://github.com/netlify/build/tree/master/packages/functions-utils#readme
       functions,
     },
   }) {
     try {
-      // Commands are printed in Netlify logs
-      await run('echo', ['Hello world!\n'])
+      const allPackages = fs
+        .readdir(packagesDir)
+        .filter((f) => fs.statSync(path.join(packagesDir, f)).isDirectory())
+
+      console.log('allPackages', allPackages)
+
+      const changedPackages = allPackages
+        .map((package) => {
+          const { edited, deleted } = git.fileMatch(
+            path.join(packagesDir, package),
+          )
+
+          return edited.length || deleted.length ? package : null
+        })
+        .filter(Boolean)
+
+      console.log('changedPackages', changedPackages)
+
+      const changedPackageNames = changedPackages
+        .map((packageDir) => {
+          const packageJsonPath = path.join(
+            packagesDir,
+            packageDir,
+            'package.json',
+          )
+
+          if (!fs.existsSync(packageJsonPath)) {
+            return null
+          }
+
+          const jsonContent = fs.readFileSync(packageJsonPath)
+          return JSON.parse(jsonContent).name
+        })
+        .filter(Boolean)
+
+      const changedPackgesGlob = `{${changedPackageNames.join(',')}}`
+
+      console.log('changedPackagesScope', changedPackgesGlob)
+
+      await run('export', [`LERNA_CHANGED_SCOPE=${changedPackgesGlob}`])
+
+      for (const packageDir of allPackages) {
+        const distPath = path.join(packagesDir, packageDir, 'dist')
+
+        console.log('Restoring cache', distPath)
+
+        const status = await cache.restore(distPath)
+
+        console.log('Restoring status', status, distPath)
+      }
+
+      const { stdout, stderr, exitCode } = await run('git', [
+        'diff',
+        '--quiet',
+        '${CACHED_COMMIT_REF:-HEAD^}',
+        '${COMMIT_REF:-HEAD}',
+        'packages',
+      ])
+
+      console.log('exitCode', exitCode)
     } catch (error) {
       // Report a user error
       build.failBuild('Error message', { error })
@@ -87,6 +146,22 @@ module.exports = {
     status.show({ summary: 'Success!' })
   },
 
+  async onSuccess({ utils: { cache } }) {
+    const allPackages = fs
+      .readdir(packagesDir)
+      .filter((f) => fs.statSync(path.join(packagesDir, f)).isDirectory())
+
+    for (const packageDir of allPackages) {
+      const distPath = path.join(packagesDir, packageDir, 'dist')
+
+      console.log('Caching', distPath)
+
+      const status = await cache.save(distPath)
+
+      console.log('Cache status', distPath, status)
+    }
+  },
+
   // Other available event handlers
   /*
   // Before build commands are executed
@@ -96,7 +171,6 @@ module.exports = {
   // After Build commands are executed
   onPostBuild() {},
   // Runs on build success
-  onSuccess() {},
   // Runs on build error
   onError() {},
   // Runs on build error or success
